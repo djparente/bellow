@@ -146,6 +146,7 @@ bellow --no-clipboard
 - I am not affiliated with OpenAI in any way.
 - Generative artificial intelligence is an advanced tool that is incompletely understood. It may harbor biases, produce unacceptable or offensive content, or provide inaccurate transcriptions.
 - I strongly recommend against using this software in any setting may expose humans to harm due to transcription errors (e.g., medical dictation, military applications, etc.)
+- The logo for Bellow is made by Generative AI using [Stable Diffusion](https://github.com/CompVis/stable-diffusion). I did perform some searching to make sure the AI was not blatantly copying any existing artwork.
 - Use at your own risk.
 
 ## Contact
