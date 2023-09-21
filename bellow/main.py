@@ -1,23 +1,22 @@
-import argparse
 import sys
+import argparse
+import logging
 import numpy as np
-import threading
-from threading import Event, Semaphore
 import sounddevice as sd
 import keyboard
 import clipboard
-
+from threading import Event, Semaphore, Lock, Thread
+from transformers import pipeline
+from transformers.pipelines import Pipeline
 from bellow.device_metadata import list_devices, get_device_name
 from bellow.soundeffects import play_effect
-from transformers import pipeline
-import logging
 
 # Set up logging
 logging.basicConfig(format='%(levelname)s: %(asctime)s - %(message)s', level=logging.INFO)
 
 # Declare the speech recognition pipeline
-pipe = None
-pipelock = threading.Lock()
+pipe: Pipeline | None = None
+pipelock = Lock()
 
 # Event for inter-thread communication to stop recording
 halt_recording = Event()
@@ -81,7 +80,7 @@ def audio_capture(device: int | None = None, sample_rate: int = 16000, channels:
 def run_whisper(audio_sample: np.ndarray[np.float32]) -> str:
     """Runs Whisper on the audio sample and extracts the text
     :param audio_sample: A np.float32 array of mono audio with sample rate 16000
-0    :return: The transcribed text by whisper
+    :return: The transcribed text by whisper
     """
     with pipelock:
         try:
@@ -146,7 +145,7 @@ def handle_run_instance() -> None:
 
     :return: None
     """
-    thread = threading.Thread(target=run_instance)
+    thread = Thread(target=run_instance)
     thread.start()
 
 
