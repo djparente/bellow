@@ -12,7 +12,7 @@ def read_effect(path: str, effect_name: str) -> None:
     try:
         effects[effect_name] = AudioData(*sf.read(path))
     except Exception as e:
-        logging.warning('Failed to read audio effect {effect_name} from {path} with exception {e}')
+        logging.warning(f'Failed to read audio effect {effect_name} from {path} with exception {e}')
 
 
 def read_effect_package(filename: str, effect_name: str) -> None:

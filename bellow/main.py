@@ -57,7 +57,7 @@ def audio_capture(device: int | None = None, sample_rate: int = 16000, channels:
     # Get a variable to hold the samples
     samples = []
 
-    # And the final samples at the end (set to None here in case an exception occurs so it has a default value)
+    # And the final samples at the end (set to None here in case an exception occurs, so it has a default value)
     full_sample = None
 
     try:
@@ -101,7 +101,7 @@ def run_whisper(audio_sample: np.ndarray[np.float32]) -> str:
             # Perform inference
             result = pipe(audio_sample.copy(), batch_size=8)["text"].strip()
         except Exception as e:
-            logging.error('Error in transcription {e}')
+            logging.error(f'Error in transcription {e}')
             # Give audio feedback that something is wrong
             play_effect('dump', blocking=False)
 
