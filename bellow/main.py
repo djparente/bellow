@@ -51,27 +51,41 @@ def audio_capture(device: int | None = None, sample_rate: int = 16000, channels:
     """
     global feedback_sound
 
+    # We don't want to halt the recording upon entry
     halt_recording.clear()
 
+    # Get a variable to hold the samples
     samples = []
+
+    # And the final samples at the end (set to None here in case an exception occurs so it has a default value)
     full_sample = None
 
     try:
+        # Open the input stream
         with sd.InputStream(samplerate=sample_rate, channels=channels, dtype='int16', device=device) as input_stream:
             logging.info('Recording')
+            # Play audio feedback that the mic is on
             play_effect('mic_on', blocking=False)
+            # While the user has not toggled recording off...
             while not halt_recording.is_set():
+                # Read in a small chunk (of sample_duration seconds) of input audio and save it
                 sample, overflow = input_stream.read(int(sample_rate * sample_duration))
                 samples.append(sample)
+            # Play audio feedback that mic is off
             play_effect(feedback_sound, blocking=False)
             logging.info('Stopped recording')
 
+        # If there is any audio recorded, concatenate it into a single array, change to a numpy float32 array
+        # and normalize by 32768. This directly parallels code in the Whisper load library. However, we are
+        # avoiding all dependence on ffmpeg here.
         if len(samples) > 0:
             full_sample = np.concatenate(samples).flatten().astype(np.float32) / 32768.0
 
     except Exception as e:
         logging.error(f'Error during microphone acquisition: {e}')
+        # If an exception occurs then the recording has halted without this getting set by the user, so set it now
         halt_recording.set()
+        # Give audio feedback that something is wrong
         play_effect('dump', blocking=False)
 
     return full_sample
@@ -84,9 +98,11 @@ def run_whisper(audio_sample: np.ndarray[np.float32]) -> str:
     """
     with pipelock:
         try:
+            # Perform inference
             result = pipe(audio_sample.copy(), batch_size=8)["text"].strip()
         except Exception as e:
             logging.error('Error in transcription {e}')
+            # Give audio feedback that something is wrong
             play_effect('dump', blocking=False)
 
     return result
@@ -163,10 +179,9 @@ def handle_toggle() -> None:
 
 
 def handle_dump() -> None:
-    """
-    Dumps the audio currently being recorded, if any is being recorded
+    """Dumps the audio currently being recorded, if any is being recorded
 
-    :return:
+    :return: None
     """
     global dump
 
@@ -175,8 +190,8 @@ def handle_dump() -> None:
 
 
 def main() -> None:
-    """
-    Runs the program
+    """Runs the program
+
     :return: None
     """
     global pipe, input_device, no_keyboard, no_clipboard

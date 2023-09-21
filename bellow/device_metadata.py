@@ -1,5 +1,3 @@
-from typing import Optional
-
 import sounddevice as sd
 
 
@@ -13,7 +11,7 @@ def list_devices() -> None:
     print(devices)
 
 
-def get_device_name(idx: Optional[int] = None, input_if_default: Optional[bool] = None) -> str:
+def get_device_name(idx: int | None = None, input_if_default: bool | None = None) -> str:
     """
     Returns the name of a device with index idx. If this is none, it returns the name of the
     default input or output device depending on the value of input_if_default. Both inputs cannot
