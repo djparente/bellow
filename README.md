@@ -6,12 +6,12 @@
 
 **Bellow** is a python program that unleashes the power of OpenAI's [Whisper speech-to-text transcription model](https://github.com/openai/whisper).
 
-Specifically, ```bellow``` enables a global hotkey to automate use of OpenAI's Whisper Model. Push Control+Alt+Shift+F11 to start recording on the default microphone and Control+Alt+Shift+F11 again to stop transcription. Bellow will pass the audio through the Whisper transcription pipeline and (1) emulate the keypresses, and (2) place the transcription on 
+Specifically, ```bellow``` enables a global hotkey to automate use of OpenAI's Whisper Model. Push Control+Alt+Shift+F11 to start recording on the default microphone and Control+Alt+Shift+F11 again to stop recording. Bellow will pass the audio through the Whisper transcription pipeline and (1) emulate the keypresses, and (2) place the transcription on the clipboard. 
 
 Whisper has a 30-second window by default, but Bellow makes use of `transformers`'s chunk_length feature to allow transcription of arbitrary length audio. 
 
 By default, it uses the whisper-medium model. Using this on an nVidia 3080 16GB GPU (Laptop version) it required
-about 4.3 GB of video RAM (VRAM) and took about 5 seconds to transcribe 1 minute of spoken audio. Thus, ```bellow``` is suitable for near-realtime applications.
+about 4.3 GB of video RAM (VRAM) and took about 5 seconds to transcribe 1 minute of spoken audio. Thus, ```bellow``` is suitable for near-realtime applications. Large models (e.g., whisper-large-v2) may provide better transcription, but will run somewhat slower. On fast GPUs, even the whisper-large-v2 model might be suitable for near-realtime applications.
 
 ## Setup
 
@@ -26,7 +26,7 @@ about 4.3 GB of video RAM (VRAM) and took about 5 seconds to transcribe 1 minute
 #### Create a virtual environment (venv)
 First, create a virtual environment and activate it.
 
-Creation:
+Creation of the virtual env
 ```
 python -m venv venv
 ```
