@@ -223,6 +223,69 @@ class TestRollingMicIdleTimeout:
         mic.close()
 
 
+class TestRollingMicDeviceBusy:
+    def test_open_stream_retries_on_failure(self):
+        """If the device is busy, _open_stream retries before raising."""
+        mic, _ = _make_rolling_mic(idle_timeout_s=0.1)
+        mic.start_session(preroll_s=0.0)
+        mic.stop_session()
+        time.sleep(0.3)
+        assert mic.stream is None  # idle-closed
+
+        # Now simulate the device being busy on reopen
+        with patch("bellow.main._find_working_samplerate", return_value=16000), \
+             patch("bellow.main.sd") as mock_sd:
+            mock_sd.InputStream.side_effect = OSError("Device or resource busy")
+            with pytest.raises(RuntimeError, match="Microphone unavailable"):
+                mic.start_session(preroll_s=0.0)
+
+        # session_active should NOT be True since open failed
+        assert mic.session_active is False
+        assert mic.stream is None
+        mic.close()
+
+    def test_open_stream_succeeds_after_transient_failure(self):
+        """If the device becomes available on retry, it should succeed."""
+        mic, _ = _make_rolling_mic(idle_timeout_s=0.1)
+        mic.start_session(preroll_s=0.0)
+        mic.stop_session()
+        time.sleep(0.3)
+        assert mic.stream is None
+
+        new_stream = MagicMock()
+        call_count = 0
+
+        def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise OSError("Device or resource busy")
+            return new_stream
+
+        with patch("bellow.main._find_working_samplerate", return_value=16000), \
+             patch("bellow.main.sd") as mock_sd:
+            mock_sd.InputStream.side_effect = _side_effect
+            mic.start_session(preroll_s=0.0)
+
+        assert mic.stream is not None
+        assert mic.session_active is True
+        mic.close()
+
+    def test_error_message_suggests_pulse(self):
+        """The error message should suggest --host pulse as a fix."""
+        mic, _ = _make_rolling_mic(idle_timeout_s=0.1)
+        mic.start_session(preroll_s=0.0)
+        mic.stop_session()
+        time.sleep(0.3)
+
+        with patch("bellow.main._find_working_samplerate", return_value=16000), \
+             patch("bellow.main.sd") as mock_sd:
+            mock_sd.InputStream.side_effect = OSError("Device busy")
+            with pytest.raises(RuntimeError, match="device busy"):
+                mic.start_session(preroll_s=0.0)
+        mic.close()
+
+
 class TestRollingMicClose:
     def test_close_permanent(self):
         mic, mock_stream = _make_rolling_mic()

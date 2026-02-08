@@ -144,8 +144,14 @@ class RollingMic:
 
     # --- stream lifecycle ---
 
-    def _open_stream(self):
-        """Open the PortAudio input stream."""
+    def _open_stream(self, retries: int = 2, retry_delay: float = 0.3):
+        """
+        Open the PortAudio input stream.
+
+        If the device is busy (e.g. exclusive ALSA access held by another app),
+        retries a few times before giving up. On failure, self.stream stays None
+        and a descriptive error is raised so callers can inform the user.
+        """
         if self._closed_permanently:
             return
         if self.stream is not None:
@@ -159,18 +165,42 @@ class RollingMic:
                 device=self.device, latency='low', blocksize=0,
                 callback=self._callback,
             )
-        try:
-            self.stream = _mk(1)
-            self.channels = 1
-        except Exception:
-            self.stream = _mk(2)
-            self.channels = 2
 
-        self.prebuf_limit = int(self.sr_in * self.prebuf_seconds)
-        self.stream.start()
-        logging.info(
-            f'RollingMic opened (SR={self.sr_in} Hz, ch={self.channels}, '
-            f'prebuf≈{self.prebuf_seconds:.2f}s, idle_timeout={self.idle_timeout_s}s)'
+        last_err = None
+        for attempt in range(1 + retries):
+            try:
+                try:
+                    self.stream = _mk(1)
+                    self.channels = 1
+                except Exception:
+                    self.stream = _mk(2)
+                    self.channels = 2
+
+                self.prebuf_limit = int(self.sr_in * self.prebuf_seconds)
+                self.stream.start()
+                logging.info(
+                    f'RollingMic opened (SR={self.sr_in} Hz, ch={self.channels}, '
+                    f'prebuf≈{self.prebuf_seconds:.2f}s, idle_timeout={self.idle_timeout_s}s)'
+                )
+                return  # success
+            except Exception as e:
+                last_err = e
+                self.stream = None
+                if attempt < retries:
+                    logging.warning(
+                        f'Mic busy (attempt {attempt + 1}/{1 + retries}): {e} '
+                        f'-- retrying in {retry_delay}s'
+                    )
+                    time.sleep(retry_delay)
+
+        # All retries exhausted
+        logging.error(
+            f'Could not open microphone after {1 + retries} attempts: {last_err}. '
+            f'Another application may have exclusive access to the audio device. '
+            f'Close it or switch to --host pulse for shared access.'
+        )
+        raise RuntimeError(
+            f'Microphone unavailable (device busy): {last_err}'
         )
 
     def _close_stream(self):
@@ -234,6 +264,9 @@ class RollingMic:
         """
         Begin a logical capture session; seed with last preroll_s seconds.
         Reopens the stream if it was closed by idle timeout.
+
+        Raises RuntimeError if the microphone cannot be opened (e.g. device
+        held exclusively by another application).
         """
         with self.lock:
             self._cancel_idle_timer()
@@ -241,9 +274,9 @@ class RollingMic:
             if self.stream is None:
                 logging.info('RollingMic reopening stream (was idle-closed)')
                 self._open_stream()
-                # Small sleep to let the stream start and fill some buffer
-                # (we won't have pre-roll in this case, but at least the
-                # stream is open for the session)
+                # After reopen the prebuffer is empty, so no pre-roll audio
+                # will be available -- this is acceptable for the "came back
+                # after idle" case.
 
             preroll_s = max(0.0, float(preroll_s))
             need = int(min(preroll_s, self.prebuf_limit / self.sr_in) * self.sr_in) if self.sr_in else 0
