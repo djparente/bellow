@@ -13,12 +13,16 @@ setup(
     },
     install_requires=[
         "clipboard>=0.0.4",
-        "keyboard>=0.13.5",
         "numpy>=1.24.1",
+        "pynput>=1.7.6",
         "sounddevice>=0.4.6",
         "soundfile>=0.12.1",
-        "transformers>=4.33.2"
+        "transformers>=4.33.2",
     ],
+    extras_require={
+        "faster-whisper": ["faster-whisper>=0.10.0"],
+        "dev": ["pytest>=7.0", "scipy>=1.10.0"],
+    },
     author="Daniel J. Parente",
     author_email="dan.parente@gmail.com",
     description="Implements a pushbutton interface to the Whisper transformer using a global hotkey",
@@ -30,7 +34,7 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires='>=3.7',
+    python_requires='>=3.10',
     entry_points={
         'console_scripts': [
             'bellow=bellow.main:main'
