@@ -8,7 +8,7 @@ import numpy as np
 import sounddevice as sd
 from pynput import keyboard
 import clipboard
-from threading import Event, Semaphore, Lock, Thread, Timer
+from threading import Event, BoundedSemaphore, Lock, Thread, Timer
 from typing import Optional, Union
 
 from bellow.device_metadata import list_devices, get_device_name
@@ -33,7 +33,7 @@ halt_recording.set()
 pause_recording = Event()
 pause_recording.clear()
 
-capture_semaphore = Semaphore()
+capture_semaphore = BoundedSemaphore(1)
 
 dump = False
 feedback_sound = 'mic_off'
@@ -43,6 +43,10 @@ no_keyboard = False
 no_clipboard = False
 
 keyboard_controller = keyboard.Controller()
+
+# Serializes clipboard/keyboard output so concurrent transcription threads
+# don't interleave their results.
+_output_lock = Lock()
 
 # Keep a reference to the hotkey listener so signal handlers can stop it
 _hotkeys_listener: keyboard.GlobalHotKeys | None = None
@@ -362,8 +366,11 @@ def audio_capture(device: int | None = None,
 
     except Exception as e:
         logging.error(f'Error during microphone acquisition: {e}')
-        halt_recording.set()
         play_effect('dump', blocking=False)
+    finally:
+        # Guarantee halt_recording is set on every exit path so the toggle
+        # never gets stuck thinking a recording is still active.
+        halt_recording.set()
     return full_sample
 
 
@@ -384,6 +391,8 @@ def run_instance(args=None) -> None:
     if not did_acquire:
         logging.info('Semaphore blocked new recording while processing ongoing')
         return
+
+    # --- Recording phase (semaphore held) ---
     try:
         pause_recording.clear()
         captured = audio_capture(
@@ -391,7 +400,18 @@ def run_instance(args=None) -> None:
             sample_duration=0.1,
             preroll_s=(args.preroll_seconds if args else 0.6),
         )
-        if captured is not None and not dump and _backend is not None:
+        # Snapshot dump flag before releasing the semaphore; a new session
+        # could overwrite the global between release and the check below.
+        should_dump = dump
+    finally:
+        capture_semaphore.release()
+
+    # --- Transcription & output phase (semaphore released) ---
+    # Runs outside the semaphore so the user can immediately start a new
+    # recording even while a previous transcription is still processing.
+    if captured is not None and not should_dump and _backend is not None:
+        try:
+            t0 = time.monotonic()
             full_res = _backend.transcribe(
                 captured,
                 timestamps_mode=args.timestamps if args else "auto",
@@ -399,18 +419,41 @@ def run_instance(args=None) -> None:
                 task=args.task if args else "auto",
                 language=args.language if args else "auto",
             )
-            if full_res and not no_clipboard:
-                try:
-                    clipboard.copy(full_res)
-                except Exception as e:
-                    logging.error(f'Clipboard copy failed: {e}')
-            if full_res and not no_keyboard:
-                for char in full_res:
+            elapsed = time.monotonic() - t0
+            if elapsed > 30:
+                logging.warning(
+                    f'Transcription took {elapsed:.1f}s — consider a smaller '
+                    f'model or GPU acceleration'
+                )
+        except Exception as e:
+            logging.error(f'Transcription failed: {e}')
+            play_effect('dump', blocking=False)
+            return
+
+        if full_res:
+            _deliver_output(full_res)
+
+
+def _deliver_output(text: str) -> None:
+    """Deliver transcription result via clipboard and/or keyboard emulation.
+
+    Serialized with _output_lock so concurrent transcription threads don't
+    interleave their keyboard output.
+    """
+    with _output_lock:
+        if not no_clipboard:
+            try:
+                clipboard.copy(text)
+            except Exception as e:
+                logging.error(f'Clipboard copy failed: {e}')
+        if not no_keyboard:
+            try:
+                for char in text:
                     keyboard_controller.press(char)
                     keyboard_controller.release(char)
                     time.sleep(0.005)
-    finally:
-        capture_semaphore.release()
+            except Exception as e:
+                logging.error(f'Keyboard emulation failed: {e}')
 
 
 def handle_run_instance(args) -> None:
