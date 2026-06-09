@@ -1,270 +1,243 @@
-import sys
+"""Bellow: push-to-talk Whisper transcription bound to global hotkeys.
+
+Control flow
+------------
+Four global hotkeys drive a small state machine (see recorder.py):
+
+    toggle  -- start recording / stop recording and transcribe
+    dump    -- stop recording and discard the audio
+    mic     -- arm (standby) or fully release the microphone
+    quit    -- exit Bellow
+
+While armed, the microphone stream stays open and a short pre-roll ring
+buffer is kept, so the first moments of speech are not lost to audio device
+start-up latency. The mic hotkey releases the device entirely so other
+applications (e.g. video conferencing) can use it.
+
+Transcription runs on a worker thread fed by a queue, so a new recording can
+start while the previous one is still being transcribed; results are
+delivered in order to the clipboard and/or as emulated keystrokes.
+"""
+
+from __future__ import annotations
+
 import argparse
 import logging
-import numpy as np
-import sounddevice as sd
-import keyboard
-import clipboard
-from threading import Event, Semaphore, Lock, Thread
-from transformers import pipeline
-from transformers.pipelines import Pipeline
-from bellow.device_metadata import list_devices, get_device_name
+import sys
+import threading
+
+from bellow.device_metadata import get_device_name, list_devices
+from bellow.hotkeys import HotkeyManager, warn_if_wayland
+from bellow.output import OutputSink
+from bellow.recorder import Recorder, RecorderState
 from bellow.soundeffects import play_effect
+from bellow.transcriber import Transcriber
 
-# Set up logging
 logging.basicConfig(format='%(levelname)s: %(asctime)s - %(message)s', level=logging.INFO)
-
-# Declare the speech recognition pipeline
-pipe: Pipeline | None = None
-pipelock = Lock()
-
-# Event for inter-thread communication to stop recording
-halt_recording = Event()
-halt_recording.set()
-
-# A semaphore to ensure that only one thread is capturing audio data at a time
-capture_semaphore = Semaphore()
-
-# A variable to dump the audio instead of using it
-dump = False
-
-# A variable that sets the feedback sound to play (when dumping, this is temporarily changed)
-feedback_sound = 'mic_off'
-
-# A variable that keeps track of the input microphone
-input_device = None
-
-# Status variables for how to return results
-no_keyboard = False
-no_clipboard = False
+logger = logging.getLogger(__name__)
 
 
-def audio_capture(device: int | None = None, sample_rate: int = 16000, channels: int = 1,
-                  sample_duration: int = 1) -> np.ndarray[np.float32] | None:
-    """ Capture an infinite amount of audio
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='bellow',
+        description='Global-hotkey speech-to-text using OpenAI Whisper')
+    parser.add_argument('-m', '--model', type=str, default='openai/whisper-large-v3-turbo',
+                        help='HuggingFace Whisper model to use (default: %(default)s)')
+    parser.add_argument('-d', '--device', type=str, default='auto',
+                        help="Torch device for inference: 'auto', 'cpu', 'cuda:0', ... "
+                             '(default: %(default)s)')
+    parser.add_argument('--dtype', type=str, default='auto',
+                        choices=['auto', 'float16', 'float32'],
+                        help='Inference precision; auto = float16 on CUDA, float32 on CPU')
+    parser.add_argument('-l', '--language', type=str, default=None,
+                        help='Force the transcription language (default: autodetect)')
+    parser.add_argument('--chunk-length', type=float, default=0.0,
+                        help='If > 0, use chunked long-form decoding with this chunk size in '
+                             'seconds (faster on very long audio, but can lose words at chunk '
+                             'boundaries). Default 0 = sequential long-form decoding.')
+    parser.add_argument('-i', '--input', type=str, default=None,
+                        help='Audio input device index or name substring; '
+                             'see --list-devices (default: system default input)')
+    parser.add_argument('--list-devices', action='store_true', default=False,
+                        help='Display all audio devices and exit')
+    parser.add_argument('--toggle-hotkey', type=str, default='ctrl+shift+alt+f11',
+                        help='Hotkey to start recording / stop and transcribe '
+                             '(default: %(default)s)')
+    parser.add_argument('--dump-hotkey', type=str, default='ctrl+shift+alt+f12',
+                        help='Hotkey to stop recording and discard the audio '
+                             '(default: %(default)s)')
+    parser.add_argument('--mic-hotkey', type=str, default='ctrl+shift+alt+f10',
+                        help='Hotkey to arm/release the microphone; releasing frees the '
+                             'device for other applications (default: %(default)s)')
+    parser.add_argument('--quit-hotkey', type=str, default='ctrl+shift+alt+esc',
+                        help='Hotkey to exit bellow (default: %(default)s)')
+    parser.add_argument('--preroll', type=float, default=1.0,
+                        help='Seconds of standby audio to prepend to each recording so the '
+                             'start of speech is not lost (default: %(default)s; 0 disables)')
+    parser.add_argument('--no-standby', action='store_true', default=False,
+                        help='Do not hold the microphone open between recordings. The device '
+                             'stays free for other applications, but pre-roll is unavailable '
+                             'and recording start is slower.')
+    parser.add_argument('--min-duration', type=float, default=0.25,
+                        help='Discard recordings shorter than this many seconds; very short '
+                             'clips make Whisper hallucinate (default: %(default)s)')
+    parser.add_argument('--no-clipboard', action='store_true', default=False,
+                        help='Disable output to the clipboard')
+    parser.add_argument('--no-keyboard', action='store_true', default=False,
+                        help='Disable output using keyboard emulation')
+    return parser
 
-    :param device: The sounddevice device to acquire audio on; defaults to the default input
-    :param sample_rate: Sample rate of the audio; note that Whisper expects 16000
-    :param channels: The number of audio channels; note that Whisper expects 1
-    :param sample_duration: The duration of recorded mini-chunks (time between checking for stop)
-    :return: A concatenation of the samples as a numpy array ranged from -1 to 1
-    """
-    global feedback_sound
 
-    # We don't want to halt the recording upon entry
-    halt_recording.clear()
+class BellowApp:
+    """Owns the recorder, transcriber and output sink, and implements the
+    hotkey handlers. Hotkey callbacks are serialized by pynput's listener
+    thread, so the handlers below never run concurrently with one another."""
 
-    # Get a variable to hold the samples
-    samples = []
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.hold_standby = not args.no_standby
+        self.quit_event = threading.Event()
 
-    # And the final samples at the end (set to None here in case an exception occurs, so it has a default value)
-    full_sample = None
+        input_device: int | str | None = args.input
+        if input_device is not None and input_device.lstrip('-').isdigit():
+            input_device = int(input_device)
+        self.input_device = input_device
 
-    try:
-        # Open the input stream
-        with sd.InputStream(samplerate=sample_rate, channels=channels, dtype='int16', device=device) as input_stream:
-            logging.info('Recording')
-            # Play audio feedback that the mic is on
-            play_effect('mic_on', blocking=False)
-            # While the user has not toggled recording off...
-            while not halt_recording.is_set():
-                # Read in a small chunk (of sample_duration seconds) of input audio and save it
-                sample, overflow = input_stream.read(int(sample_rate * sample_duration))
-                samples.append(sample)
-            # Play audio feedback that mic is off
-            play_effect(feedback_sound, blocking=False)
-            logging.info('Stopped recording')
+        self.sink = OutputSink(use_clipboard=not args.no_clipboard,
+                               use_keyboard=not args.no_keyboard)
+        self.recorder = Recorder(device=input_device, samplerate=16000,
+                                 preroll_seconds=args.preroll)
+        self.transcriber = Transcriber(
+            model=args.model, device=args.device, dtype=args.dtype,
+            language=args.language, chunk_length_s=args.chunk_length,
+            on_result=self.sink.deliver,
+            on_error=lambda e: play_effect('dump'),
+        )
 
-        # If there is any audio recorded, concatenate it into a single array, change to a numpy float32 array
-        # and normalize by 32768. This directly parallels code in the Whisper load library. However, we are
-        # avoiding all dependence on ffmpeg here.
-        if len(samples) > 0:
-            full_sample = np.concatenate(samples).flatten().astype(np.float32) / 32768.0
+    # -- hotkey handlers ----------------------------------------------------
 
-    except Exception as e:
-        logging.error(f'Error during microphone acquisition: {e}')
-        # If an exception occurs then the recording has halted without this getting set by the user, so set it now
-        halt_recording.set()
-        # Give audio feedback that something is wrong
-        play_effect('dump', blocking=False)
+    def on_toggle(self) -> None:
+        if self.recorder.state == RecorderState.RECORDING:
+            audio = self.recorder.stop_recording()
+            if not self.hold_standby:
+                self.recorder.disable()
+            play_effect('mic_off')
+            if audio is None or len(audio) < self.args.min_duration * self.recorder.samplerate:
+                logger.info('Recording shorter than %.2fs; skipping transcription',
+                            self.args.min_duration)
+            else:
+                self.transcriber.submit(audio)
+        else:
+            try:
+                self.recorder.start_recording()
+            except Exception as e:
+                logger.error('Could not open the audio input device: %s', e)
+                play_effect('dump')
+                return
+            play_effect('mic_on')
 
-    return full_sample
+    def on_dump(self) -> None:
+        if self.recorder.state == RecorderState.RECORDING:
+            self.recorder.cancel_recording()
+            if not self.hold_standby:
+                self.recorder.disable()
+            play_effect('dump')
 
+    def on_mic(self) -> None:
+        if self.recorder.state == RecorderState.OFF:
+            try:
+                self.recorder.enable()
+            except Exception as e:
+                logger.error('Could not open the audio input device: %s', e)
+                play_effect('dump')
+                return
+            play_effect('armed')
+        else:
+            discarded = self.recorder.disable()
+            play_effect('dump' if discarded else 'released')
 
-def run_whisper(audio_sample: np.ndarray[np.float32]) -> str:
-    """Runs Whisper on the audio sample and extracts the text
-    :param audio_sample: A np.float32 array of mono audio with sample rate 16000
-    :return: The transcribed text by whisper
-    """
-    with pipelock:
+    def on_quit(self) -> None:
+        logger.info('Quit hotkey pressed')
+        self.quit_event.set()
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def run(self) -> int:
+        args = self.args
+
+        logger.info('Model: %s', args.model)
+        logger.info('Output to clipboard: %s', not args.no_clipboard)
+        logger.info('Emulate keyboard presses: %s', not args.no_keyboard)
+        logger.info('Input device: %s', get_device_name(self.input_device, kind='input'))
+        logger.info('Output device: %s', get_device_name(None, kind='output'))
+        logger.info('Toggle hotkey: %s', args.toggle_hotkey)
+        logger.info('Dump hotkey: %s', args.dump_hotkey)
+        logger.info('Mic arm/release hotkey: %s', args.mic_hotkey)
+        logger.info('Quit hotkey: %s', args.quit_hotkey)
+
         try:
-            # Perform inference
-            result = pipe(audio_sample.copy(), batch_size=8)["text"].strip()
+            hotkeys = HotkeyManager({
+                args.toggle_hotkey: self.on_toggle,
+                args.dump_hotkey: self.on_dump,
+                args.mic_hotkey: self.on_mic,
+                args.quit_hotkey: self.on_quit,
+            })
+        except ValueError as e:
+            logger.error('Invalid hotkey configuration: %s', e)
+            return 1
         except Exception as e:
-            logging.error(f'Error in transcription {e}')
-            # Give audio feedback that something is wrong
-            play_effect('dump', blocking=False)
+            logger.error('Could not initialize the global hotkey system: %s', e)
+            warn_if_wayland()
+            return 1
 
-    return result
+        self.transcriber.load()
+        self.transcriber.start()
 
+        if self.hold_standby:
+            try:
+                self.recorder.enable()
+            except Exception as e:
+                logger.error('Could not open the audio input device at startup: %s. '
+                             'Use the mic hotkey (%s) to retry, or --list-devices to pick '
+                             'another input.', e, args.mic_hotkey)
 
-def set_halt(dump_audio: bool = False) -> None:
-    """Handler method for a keypress event to stop recording
+        try:
+            hotkeys.start()
+        except Exception as e:
+            logger.error('Could not start the global hotkey listener: %s', e)
+            warn_if_wayland()
+            self.recorder.disable()
+            self.transcriber.stop(wait=False)
+            return 1
 
-    :param dump_audio: Whether to ignore this audio
+        logger.info('Ready')
+        try:
+            self.quit_event.wait()
+        except KeyboardInterrupt:
+            logger.info('Interrupted')
 
-    :return: None
-    """
-    global dump, feedback_sound
-    dump = dump_audio
-
-    if dump:
-        feedback_sound = 'dump'
-    else:
-        feedback_sound = 'mic_off'
-
-    logging.info('Notifying of halt')
-    halt_recording.set()
-
-
-def run_instance() -> None:
-    """Runs an audio capture and transcribes it.
-
-    :return: None
-    """
-    global dump, input_device, no_clipboard, no_keyboard
-
-    did_acquire_semaphore = capture_semaphore.acquire(blocking=False)
-
-    if not did_acquire_semaphore:
-        logging.info('Semaphore blocked new recording while processing ongoing')
-        return
-
-    try:
-        captured = audio_capture(device=input_device)
-
-        if captured is not None and not dump:
-            full_res = run_whisper(captured)
-
-            # Write the data to clipboard and screen
-            if not no_clipboard:
-                clipboard.copy(full_res)
-            if not no_keyboard:
-                keyboard.write(full_res)
-    finally:
-        # Release the semaphore
-        capture_semaphore.release()
-
-
-def handle_run_instance() -> None:
-    """ Handler method to start an instance (which will succeed if one is not already running)
-
-    :return: None
-    """
-    thread = Thread(target=run_instance)
-    thread.start()
-
-
-def handle_toggle() -> None:
-    """ Handler method to toggle recording on/off
-
-    :return: None
-    """
-    global dump
-
-    if halt_recording.is_set():
-        handle_run_instance()
-    else:
-        set_halt(dump_audio=False)
-
-
-def handle_dump() -> None:
-    """Dumps the audio currently being recorded, if any is being recorded
-
-    :return: None
-    """
-    global dump
-
-    if not halt_recording.is_set():
-        set_halt(dump_audio=True)
+        # Orderly shutdown: stop hotkeys, release the mic, drain the queue
+        hotkeys.stop()
+        self.recorder.disable()
+        self.transcriber.stop(wait=True)
+        logger.info('Terminated normally')
+        return 0
 
 
 def main() -> None:
-    """Runs the program
-
-    :return: None
-    """
-    global pipe, input_device, no_keyboard, no_clipboard
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-m', '--model', type=str, default="openai/whisper-medium",
-                        help="A HuggingFace OpenAI model to use", dest='model')
-    parser.add_argument('--toggle-hotkey', type=str, default="ctrl+shift+alt+f11",
-                        help='Hotkey sequence to toggle microphone on/off')
-    parser.add_argument('--dump-hotkey', type=str, default="ctrl+shift+alt+f12",
-                        help='Hotkey sequence to toggle microphone off with dumping of audio')
-    parser.add_argument('-d', '--device', type=str, default="cuda:0",
-                        help='The torch device to use (e.g., cuda:0 or cpu)')
-    parser.add_argument('-i', '--input', type=int, default=None,
-                        help='The index of the input device to use; find the index using --list-device')
-    parser.add_argument('--list-devices', action='store_true', default=False, help="Displays all audio devices")
-    parser.add_argument('--no-clipboard', action='store_true', default=False, help="Disables output to the clipboard")
-    parser.add_argument('--no-keyboard', action='store_true', default=False,
-                        help="Disables output using keyboard emulation")
-
-    args = parser.parse_args()
+    args = build_parser().parse_args()
 
     if args.list_devices:
         list_devices()
         return
 
-    if args.input is not None:
-        input_device = int(args.input)
+    if args.no_keyboard and args.no_clipboard:
+        logger.error('Both keyboard and clipboard output are disabled. There would be no '
+                     'output. Allow at least one of these methods. Aborting.')
+        sys.exit(1)
 
-    no_keyboard = args.no_keyboard
-    no_clipboard = args.no_clipboard
-
-    if no_keyboard and no_clipboard:
-        logging.error('Both keyboard and clipboard output is disabled. There will be no output. Allow one of these '
-                      'methods. Aborting.')
-        sys.exit(-1)
-
-    # Some logging
-    logging.info(f'Model: {args.model}')
-    logging.info(f'Inference Device: {args.device}')
-    logging.info(f'Output to clipboard: {not no_clipboard}')
-    logging.info(f'Emulate keyboard presses: {not no_keyboard}')
-    logging.info(f'Input Device: {get_device_name(idx=input_device, input_if_default=True)}')
-    logging.info(f'Output Device: {get_device_name(idx=None, input_if_default=False)}')
-    logging.info(f'Toggle Hotkey: {args.toggle_hotkey}')
-    logging.info(f'Dump Hotkey: {args.dump_hotkey}')
-    logging.info(f'Loading the model {args.model}')
-
-    with pipelock:
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=args.model,
-            chunk_length_s=30,
-            device=args.device
-        )
-
-    # Register a hotkey
-    keyboard.add_hotkey(args.toggle_hotkey, handle_toggle)
-    keyboard.add_hotkey(args.dump_hotkey, handle_dump)
-
-    # Notify load is completed
-    logging.info('Ready')
-
-    # Wait for keyboard hotkeys until Ctrl+Shift+Alt+Esc is detected
-    keyboard.wait('ctrl+shift+alt+esc')
-
-    keyboard.remove_hotkey(args.toggle_hotkey)
-    keyboard.remove_hotkey(args.dump_hotkey)
-
-    # Notify of exit
-    logging.info('Terminated normally')
-
-    exit(0)
+    warn_if_wayland()
+    sys.exit(BellowApp(args).run())
 
 
 if __name__ == '__main__':
