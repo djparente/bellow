@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bellow"
+dynamic = ["version"]
+description = "Push-to-talk speech-to-text using OpenAI Whisper, bound to global hotkeys"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Daniel J. Parente", email = "dan.parente@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.1",
+    "pynput>=1.7.6",
+    "pyperclip>=1.8.2",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+    "transformers>=4.45.0",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[project.urls]
+Homepage = "https://github.com/djparente/bellow"
+
+[project.scripts]
+bellow = "bellow.main:main"
+
+[tool.setuptools]
+packages = ["bellow", "bellow.audio"]
+
+[tool.setuptools.dynamic]
+version = { attr = "bellow.__version__.__version__" }
+
+[tool.setuptools.package-data]
+"bellow.audio" = ["*.ogg"]

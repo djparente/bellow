@@ -1,36 +1,24 @@
+"""Helpers for inspecting audio devices."""
+
+from __future__ import annotations
+
 import sounddevice as sd
 
 
 def list_devices() -> None:
+    """Prints a list of all input and output audio devices."""
+    print(sd.query_devices())
+
+
+def get_device_name(device: int | str | None = None, kind: str = 'input') -> str:
+    """Return the name of an audio device.
+
+    :param device: device index or name substring; None for the default device
+    :param kind: 'input' or 'output'; used to pick the default device when
+        device is None
+    :return: the device name, or a description of the failure
     """
-    Prints a list of all input and output audio devices
-
-    :return: None
-    """
-    devices = sd.query_devices()
-    print(devices)
-
-
-def get_device_name(idx: int | None = None, input_if_default: bool | None = None) -> str:
-    """
-    Returns the name of a device with index idx. If this is none, it returns the name of the
-    default input or output device depending on the value of input_if_default. Both inputs cannot
-    be simultaneously unspecified (None).
-
-    :param idx: The index of the device in the query_devices list
-    :param input_if_default: If idx is None, should we return the default input device (if false, return output device)
-    :return: The name of the specified device
-    """
-    # If index is none, get one of the default devices
-    if idx is None:
-        if input_if_default is None:
-            raise ValueError('Cannot retrieve input/output device if input_if_default is None')
-
-        if input_if_default:
-            return sd.query_devices(sd.default.device[0])['name']
-        else:
-            return sd.query_devices(sd.default.device[1])['name']
-
-    # Otherwise return name by index
-    devices = sd.query_devices()
-    return devices[idx]['name']
+    try:
+        return sd.query_devices(device, kind if device is None else None)['name']
+    except Exception as e:
+        return f'<unavailable: {e}>'

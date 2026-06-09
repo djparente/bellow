@@ -6,20 +6,31 @@
 
 **Bellow** is a python program that unleashes the power of OpenAI's [Whisper speech-to-text transcription model](https://github.com/openai/whisper).
 
-Specifically, ```bellow``` enables a global hotkey to automate use of OpenAI's Whisper Model. Push Control+Alt+Shift+F11 to start recording on the default microphone and Control+Alt+Shift+F11 again to stop recording. Bellow will pass the audio through the Whisper transcription pipeline and (1) emulate the keypresses, and (2) place the transcription on the clipboard. 
+Specifically, ```bellow``` enables global hotkeys to automate use of OpenAI's Whisper model. Push Control+Alt+Shift+F11 to start recording on the microphone and Control+Alt+Shift+F11 again to stop. Bellow will pass the audio through the Whisper transcription pipeline and (1) emulate the keypresses, and (2) place the transcription on the clipboard.
 
-Whisper has a 30-second window by default, but Bellow makes use of `transformers`'s chunk_length feature to allow transcription of arbitrary length audio. 
+To make sure the very first moments of your speech are never lost to audio-device start-up latency, Bellow keeps the microphone in a low-cost *standby* mode between recordings and prepends a short pre-roll buffer (default: 1 second) to each recording. When you need the microphone for something else (a Zoom call, for example), press the *mic hotkey* (default Control+Alt+Shift+F10) to fully release the device; press it again to re-arm.
 
-By default, it uses the whisper-medium model. Using this on an nVidia 3080 16GB GPU (Laptop version) it required
-about 4.3 GB of video RAM (VRAM) and took about 5 seconds to transcribe 1 minute of spoken audio. Thus, ```bellow``` is suitable for near-realtime applications. Large models (e.g., whisper-large-v2) may provide better transcription, but will run somewhat slower. On fast GPUs, even the whisper-large-v2 model might be suitable for near-realtime applications.
+By default, Bellow uses the `openai/whisper-large-v3-turbo` model with float16 inference on the GPU, which is both faster and more accurate than older medium-size models while using a similar amount of VRAM. Transcription of arbitrary-length audio uses Whisper's sequential long-form decoding for best accuracy.
+
+## Hotkeys
+
+| Hotkey (default) | Action |
+|---|---|
+| `ctrl+alt+shift+f11` | Start recording / stop and transcribe |
+| `ctrl+alt+shift+f12` | Stop recording and discard the audio |
+| `ctrl+alt+shift+f10` | Arm/release the microphone (release frees the device for other apps) |
+| `ctrl+alt+shift+esc` | Quit Bellow |
+
+You will hear distinct audio cues when recording starts, stops, is discarded, and when the microphone is armed or released.
 
 ## Setup
 
 ### Requirements
-- Bellow runs transcription using OpenAI's Whisper model on a local GPU. This requires a local GPU with enough VRAM to hold the full Whisper model. In principle, you could do inference on the CPU, but this will be very slow and will not likely be suitable for near-realtime applications. I have tested this with NVIDIA GPUs. I am not sure if they would run with AMD using ROCm.
-- You will need to be running Python 3.7 or higher (tested with version 3.10.11)
-- You will need a system able to run [PyTorch](https://pytorch.org/) on your GPU
-- You may need to install the appropriate drivers for GPU
+- Bellow runs transcription using OpenAI's Whisper model locally. A CUDA GPU is strongly recommended for near-realtime use; CPU inference works (`--device cpu` or automatically when no GPU is found) but is slow.
+- Python 3.10 or higher.
+- A system able to run [PyTorch](https://pytorch.org/) (install torch separately, see below).
+- **Linux**: an X11 session (global hotkeys do not work under Wayland), the PortAudio library (`sudo apt install libportaudio2`), and `xclip` or `xsel` for clipboard support (`sudo apt install xclip`). Root privileges are **not** required.
+- **Windows**: no extra system packages needed.
 
 ### Installation
 
@@ -48,12 +59,12 @@ Activation in Windows (cmd.exe):
 
 #### Install Torch
 
-You will first need to install torch. You will want to install one with CUDA support. You can find the correct installation command using the builder at: https://pytorch.org/get-started/locally/. For example:
+You will first need to install torch, ideally with CUDA support. You can find the correct installation command using the builder at: https://pytorch.org/get-started/locally/. For example:
 ```
 pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
-#### Install Bellow 
+#### Install Bellow
 
 ```
 pip install bellow
@@ -67,9 +78,9 @@ From within your venv, just type:
 bellow
 ```
 
-When you want to start recording audio push the toggle hotkey (default: ctrl+alt+shift+f11) and dictate for some time. When finished dictating, push the toggle hotkey again and bellow will use Whisper to transcribe your audio to text. It will then simulate keypresses entering this text and also copy it to the clipboard. If, when dictating, you decide you want to stop and discard (not transcribe) the audio, push the dump hotkey instead (default: ctrl+alt+shift+f12). You will receive audio confirmation when the microphone turns on and off.
+When you want to start recording audio push the toggle hotkey (default: ctrl+alt+shift+f11) and dictate for some time. When finished dictating, push the toggle hotkey again and bellow will use Whisper to transcribe your audio to text. It will then simulate keypresses entering this text and also copy it to the clipboard. If, when dictating, you decide you want to stop and discard (not transcribe) the audio, push the dump hotkey instead (default: ctrl+alt+shift+f12).
 
-If you would like to change the hotkeys, you can easily do this by command line argument. You can also change input device, output formats (optionally disable clipboard or keyboard emulation), and can set the device to run inference on.
+Between recordings Bellow keeps the microphone open in standby so recording starts instantly and includes a one-second pre-roll. If you need the microphone for another application, press the mic hotkey (default: ctrl+alt+shift+f10) to release the device; press it again when you want Bellow to take the microphone back. If you prefer Bellow to never hold the microphone between recordings, run it with `--no-standby` (at the cost of pre-roll and a slower recording start).
 
 I mapped the hotkey to a function on my [Razer Tartarus](https://www.razer.com/gaming-keypads/razer-tartarus-v2) (which is why the default hotkey is the way it is -- that combination is otherwise unlikely to be used).
 
@@ -77,29 +88,27 @@ Command line arguments and various options are detailed below.
 
 ## Command-line arguments
 
-You can change the model, computing device, and hotkeys using command line arguments:
-
 ### Changing the model
 
-`-m` or `--model`: Select a different Whisper Model on HuggingFace, e.g., openai/whisper-large-v2 or openai/whisper-tiny.
+`-m` or `--model`: Select a different Whisper model on HuggingFace, e.g., `openai/whisper-large-v3` or `openai/whisper-tiny`. Default: `openai/whisper-large-v3-turbo`.
 
-These models are described on the HuggingFace model cards: https://huggingface.co/openai/whisper-large-v2 
+These models are described on the HuggingFace model cards: https://huggingface.co/openai/whisper-large-v3-turbo
 
 Examples:
 
 ```
-bellow --model openai/whisper-large-v2 
+bellow --model openai/whisper-large-v3
 ```
 or
 ```
-bellow --model openai/whisper-tiny 
+bellow --model openai/whisper-tiny
 ```
 
-Large models will have better performance but slower inference speed. It seems like the 'medium' model is balances accuracy with real time transcription well.
+### Changing the Inference Device and precision
 
-### Changing the Inference Device
+`-d` or `--device` selects the inference device. The default, `auto`, uses `cuda:0` when a CUDA GPU is available and falls back to the CPU otherwise. You may specify a device explicitly, e.g. `cuda:1` or `cpu`.
 
-`-d` or `--device` will change the inference device to a different CPU or GPU. By default this uses the GPU with `cuda:0` as the argument. If you want to use a different gpu, you could specify `cuda:1`. Inference on the CPU is supported with `cpu` but is not recommended for real-time applications because it is likely to be very slow.
+`--dtype` selects the inference precision: `auto` (default; float16 on CUDA, float32 on CPU), `float16`, or `float32`.
 
 Example:
 
@@ -109,7 +118,7 @@ bellow --device cpu
 
 ### Change the audio input device (microphone)
 
-`-i` or `--input`: Can change the audio input device by specifying its numerical index. Numerical indices for various devices can be seen by calling:
+`-i` or `--input`: Select the audio input device by numerical index or by a substring of its name. Indices and names can be seen by calling:
 
 ```
 bellow --list-devices
@@ -119,17 +128,26 @@ Find the device you want in that list (suppose it were to be device 4) and use:
 bellow --input 4
 ```
 
-### Change the hotkey
+### Change the hotkeys
 
-Bellow uses two hotkeys: a toggle hotkey (default ctrl+alt+shift+F11) and a dump hotkey (default ctrl+alt+shift+F12). The toggle hotkey toggles the microphone on/off. When the microphone is toggled off, it uses Whisper to transcribe the audio. If the dump hotkey is used to turn the microphone off instead, it will simply stop recording and disregard the audio.
+The four hotkeys are configurable using `--toggle-hotkey`, `--dump-hotkey`, `--mic-hotkey` and `--quit-hotkey`. Hotkeys are written in the familiar `modifier+modifier+key` style.
 
-The hotkeys are configurable using the `--toggle-hotkey` and `--dump-hotkey` arguments, respectively.
-
-Examples:
+Example:
 
 ```
 bellow --dump-hotkey "ctrl+shift+d" --toggle-hotkey "ctrl+shift+t"
 ```
+
+### Recording behaviour
+
+- `--preroll SECONDS`: how much standby audio to prepend to each recording (default 1.0; 0 disables).
+- `--no-standby`: never hold the microphone open between recordings. The device stays free for other applications, but pre-roll is unavailable and recording start is slower.
+- `--min-duration SECONDS`: discard recordings shorter than this (default 0.25). Very short clips make Whisper hallucinate text.
+
+### Transcription behaviour
+
+- `-l` / `--language`: force the transcription language (default: autodetect), e.g. `--language en`.
+- `--chunk-length SECONDS`: if greater than 0, use transformers' chunked long-form decoding with this chunk size. This is faster on very long recordings but can lose or garble words at chunk boundaries. The default (0) uses Whisper's sequential long-form algorithm, which is more accurate.
 
 ### Disable output modes
 
@@ -140,6 +158,10 @@ Example (disables copy to clipboard):
 ```
 bellow --no-clipboard
 ```
+
+## Design
+
+See [Design.md](Design.md) for a full description of the architecture, including the recorder state machine, pre-roll ring buffer, and threading model.
 
 ## Warnings and other disclaimers
 
@@ -155,4 +177,4 @@ Please feel free to contact me or open an issue with questions or concerns!
 
 ## Citation
 
-I have no current plans to submit this anywhere for publication. I would appreciate an acknowledgement if you find this software useful for your applications. Should you want to formally cite this in an academic publication, please cite the repository URL. 
+I have no current plans to submit this anywhere for publication. I would appreciate an acknowledgement if you find this software useful for your applications. Should you want to formally cite this in an academic publication, please cite the repository URL.
